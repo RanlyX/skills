@@ -7,6 +7,7 @@ A collection of reusable AI agent skills compatible with the Agent Skills specif
 | Skill | Description | Usage |
 | :--- | :--- | :--- |
 | [`qa`](./skills/qa) | Archive and snapshot conversation transcripts, design decisions, and Q&A logs into Git-tracked Markdown files | `/qa` |
+| [`web-downloader`](./skills/web-downloader) | Render webpages with headless browser automation and archive intact HTML documents | `/web-downloader` |
 
 ## Installation
 
@@ -14,7 +15,7 @@ Install skills into your workspace or global agent environment using `npx skills
 
 ```bash
 # Install a specific skill
-npx skills add RanlyX/skills --skill qa
+npx skills add RanlyX/skills --skill web-downloader
 
 # Install all skills in this repository
 npx skills add RanlyX/skills
@@ -24,9 +25,14 @@ npx skills add RanlyX/skills
 
 ```text
 skills/
-└── qa/
+├── qa/
+│   ├── SKILL.md
+│   ├── README.md
+│   └── references/
+│       └── template.md
+└── web-downloader/
     ├── SKILL.md
     ├── README.md
-    └── references/
-        └── template.md
+    └── scripts/
+        └── download.mjs
 ```
