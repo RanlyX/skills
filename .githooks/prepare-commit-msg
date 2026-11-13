@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+
+# Skip interactive menu for merges, amends, or if a message is already provided
+if [ "$COMMIT_SOURCE" = "merge" ] || [ "$COMMIT_SOURCE" = "commit" ] || [ "$COMMIT_SOURCE" = "message" ]; then
+    exit 0
+fi
+
+# Bind stdin to TTY for interactive menu
+exec < /dev/tty
+
+function select_menu() {
+    local prompt="$1"
+    local outvar="$2"
+    shift 2
+    local options=("$@")
+    local cur=0
+    local count=${#options[@]}
+    local start_idx=0
+    
+    tput civis
+    echo "$prompt"
+    
+    # 1. Calculate current terminal height to determine viewport
+    local term_height=$(tput lines)
+    local max_visible=$((term_height - 3)) # Reserve space for prompt and input area below
+    if [ "$max_visible" -lt 3 ]; then max_visible=3; fi
+    if [ "$max_visible" -gt "$count" ]; then max_visible=$count; fi
+
+    # 2. Pre-print empty lines to prevent scrolling from breaking coordinates at the bottom of the terminal
+    for ((i=0; i<max_visible; i++)); do echo ""; done
+    echo -en "\033[${max_visible}A"
+
+    while true; do
+        # 3. Sliding window logic: Ensure current cursor (cur) is always within the viewport
+        if [ "$cur" -lt "$start_idx" ]; then
+            start_idx=$cur
+        elif [ "$cur" -ge $((start_idx + max_visible)) ]; then
+            start_idx=$((cur - max_visible + 1))
+        fi
+
+        local term_width=$(tput cols)
+        local max_width=$((term_width - 15)) # Adjusted for extra prefix length
+
+        # 4. Only render options within the visible range
+        for ((i=0; i<max_visible; i++)); do
+            local index=$((start_idx + i))
+            local text="${options[$index]}"
+            
+            # Width truncation failsafe
+            if [ ${#text} -gt $max_width ]; then
+                text="${text:0:$max_width}..."
+            fi
+
+            # Clear old content on the line
+            echo -en "\033[2K\r"
+
+            local cursor_prefix="   "
+            if [ "$index" -eq "$cur" ]; then
+                cursor_prefix=" > "
+                text="\033[7m$text\033[27m" # Invert color for highlight
+            fi
+            
+            # 5. Add up/down scroll indicators at the beginning of the line
+            local scroll_indicator="   "
+            if [ "$i" -eq 0 ] && [ "$start_idx" -gt 0 ]; then
+                scroll_indicator="\033[36m(↑)\033[0m"
+            elif [ "$i" -eq $((max_visible - 1)) ] && [ $((start_idx + max_visible)) -lt "$count" ]; then
+                scroll_indicator="\033[36m(↓)\033[0m"
+            fi
+
+            # Print the formatted line: [indicator] [cursor] [text]
+            echo -e "${scroll_indicator}${cursor_prefix}${text}"
+        done
+
+        # Read key input
+        read -rsn1 key
+        if [[ $key == $'\x1b' ]]; then
+            read -rsn2 key
+            if [[ $key == "[A" ]]; then
+                ((cur--))
+                # Loop back to the bottom
+                if [ "$cur" -lt 0 ]; then
+                    cur=$((count - 1))
+                    start_idx=$((count - max_visible))
+                fi
+            elif [[ $key == "[B" ]]; then
+                ((cur++))
+                # Loop back to the top
+                if [ "$cur" -ge "$count" ]; then
+                    cur=0
+                    start_idx=0
+                fi
+            fi
+        elif [[ $key == "" ]]; then
+            break # Confirm with Enter key
+        fi
+
+        # Move cursor back to the top of the menu to re-render
+        echo -en "\033[${max_visible}A"
+    done
+
+    tput cnorm
+    local selected_full="${options[$cur]}"
+    eval $outvar="'${selected_full%% *}'"
+}
+
+TYPES=(
+    "feat     (A new feature)" 
+    "fix      (A bug fix)" 
+    "docs     (Documentation only changes)" 
+    "style    (Code style changes)" 
+    "refactor (Code change that neither fixes a bug nor adds a feature)" 
+    "perf     (A code change that improves performance)" 
+    "test     (Adding missing tests or correcting existing tests)" 
+    "build    (Changes that affect the build system or external dependencies)" 
+    "ci       (Changes to CI configuration files and scripts)" 
+    "chore    (Other changes that don't modify src or test files)" 
+    "Cancel"
+)
+
+# Select Commit Type
+COMMIT_TYPE=""
+select_menu "Select the type of change you are committing (Use Arrow Keys & Enter):" COMMIT_TYPE "${TYPES[@]}"
+
+if [ "$COMMIT_TYPE" = "Cancel" ]; then
+    echo "Commit cancelled."
+    exit 1
+fi
+
+# Input Scope
+echo ""
+echo "Enter the scope of this change. Example: storage, systems, chassis (Press Enter to skip):"
+read -e -p "> " SCOPE
+
+# Issue ID (Only triggered if type is 'fix')
+ISSUE_TAG=""
+ISSUE_ID=""
+if [ "$COMMIT_TYPE" = "fix" ]; then
+    echo ""
+    echo "Enter the Issue ID (e.g., 654321) (Press Enter to skip):"
+    read -e -p "> " ISSUE_ID
+    
+    if [ -n "$ISSUE_ID" ]; then
+        ISSUE_TAG=" <$ISSUE_ID>"
+    fi
+fi
+
+# Input Subject
+echo ""
+echo "Enter a short description of the change (Required):"
+read -e -p "> " SUBJECT
+
+while [ -z "$SUBJECT" ]; do
+    echo "Error: Description cannot be empty!"
+    read -e -p "> " SUBJECT
+done
+
+# Breaking Change Assessment (Skipped for docs, style, build, ci)
+BANG=""
+BREAKING_DESC=""
+
+case "$COMMIT_TYPE" in
+    docs|style|build|ci)
+        # Do nothing, automatically skip breaking change prompt
+        ;;
+    *)
+        echo ""
+        echo "Does this commit introduce a BREAKING CHANGE? (y/N)"
+        read -e -p "> " IS_BREAKING
+
+        if [[ "$IS_BREAKING" =~ ^[Yy]$ ]]; then
+            BANG="!"
+            echo ""
+            echo "Please provide a description of the breaking change (Required):"
+            read -e -p "> " BREAKING_DESC
+            
+            while [ -z "$BREAKING_DESC" ]; do
+                echo "Error: Breaking change description cannot be empty!"
+                read -e -p "> " BREAKING_DESC
+            done
+        fi
+        ;;
+esac
+
+# Assemble Commit Header
+if [ -z "$SCOPE" ]; then
+    COMMIT_HEADER="${COMMIT_TYPE}${BANG}:${ISSUE_TAG} ${SUBJECT}"
+else
+    COMMIT_HEADER="${COMMIT_TYPE}(${SCOPE})${BANG}:${ISSUE_TAG} ${SUBJECT}"
+fi
+
+# Write to temporary file to prepend to the default git message
+TEMP_FILE=$(mktemp)
+
+# Write Header
+echo "$COMMIT_HEADER" > "$TEMP_FILE"
+
+# Append footers if necessary
+if [ -n "$ISSUE_ID" ] || [ -n "$BREAKING_DESC" ]; then
+    echo "" >> "$TEMP_FILE"
+fi
+
+if [ -n "$ISSUE_ID" ]; then
+    echo "Fix issues $ISSUE_ID" >> "$TEMP_FILE"
+    echo "Root cause:" >> "$TEMP_FILE"
+    echo "Solutions:" >> "$TEMP_FILE"
+fi
+
+if [ -n "$BREAKING_DESC" ]; then
+    if [ -n "$ISSUE_ID" ]; then
+        echo "" >> "$TEMP_FILE" # Add spacing between the Issue ID and Breaking Change text
+    fi
+    echo "BREAKING CHANGE: $BREAKING_DESC" >> "$TEMP_FILE"
+fi
+
+# Append the original git commit message template
+echo "" >> "$TEMP_FILE" 
+cat "$COMMIT_MSG_FILE" >> "$TEMP_FILE"
+
+# Overwrite the original commit message file
+mv "$TEMP_FILE" "$COMMIT_MSG_FILE"
+
